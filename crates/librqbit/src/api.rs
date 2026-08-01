@@ -484,6 +484,60 @@ impl Api {
         Ok(mgr.with_chunk_tracker(|chunks| format!("{:?}", chunks.get_have_pieces().as_slice()))?)
     }
 
+    /// Returns the verified, contiguous bytes available from `offset` in one
+    /// file. Unlike per-file progress this is safe to use as a streaming
+    /// buffer signal after a seek: it stops at the first missing piece.
+    pub fn api_contiguous_bytes_from(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        offset: u64,
+    ) -> Result<ContiguousBytesResponse> {
+        let mgr = self.mgr_handle(idx)?;
+        let Some((file_offset, file_len)) = mgr.with_metadata(|metadata| {
+            metadata
+                .file_infos
+                .get(file_id)
+                .map(|file| (file.offset_in_torrent, file.len))
+        })? else {
+            return Err(ApiError::new_from_text(
+                StatusCode::BAD_REQUEST,
+                "file index out of bounds",
+            ));
+        };
+        let offset = offset.min(file_len);
+        let absolute_offset = file_offset.saturating_add(offset);
+        let file_end = file_offset.saturating_add(file_len);
+        let contiguous_bytes = mgr.with_chunk_tracker(|chunks| {
+            let lengths = chunks.get_lengths();
+            let mut cursor = absolute_offset;
+            let mut piece_id = cursor / u64::from(lengths.default_piece_length());
+            while cursor < file_end {
+                let Some(piece) = lengths.validate_piece_index(piece_id as u32) else {
+                    break;
+                };
+                if !chunks.is_piece_have(piece) {
+                    break;
+                }
+                let piece_end = lengths
+                    .piece_offset(piece)
+                    .saturating_add(u64::from(lengths.piece_length(piece)));
+                let next = piece_end.min(file_end);
+                if next <= cursor {
+                    break;
+                }
+                cursor = next;
+                piece_id = piece_id.saturating_add(1);
+            }
+            cursor.saturating_sub(absolute_offset)
+        })?;
+        Ok(ContiguousBytesResponse {
+            file_id,
+            offset,
+            contiguous_bytes,
+        })
+    }
+
     pub fn api_stream(&self, idx: TorrentIdOrHash, file_id: usize) -> Result<FileStream> {
         let mgr = self.mgr_handle(idx)?;
         Ok(mgr.stream(file_id)?)
@@ -493,6 +547,13 @@ impl Api {
 #[derive(Serialize)]
 pub struct TorrentListResponse {
     pub torrents: Vec<TorrentDetailsResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContiguousBytesResponse {
+    pub file_id: usize,
+    pub offset: u64,
+    pub contiguous_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]

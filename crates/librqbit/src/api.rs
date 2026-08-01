@@ -564,6 +564,19 @@ impl Api {
         file_id: usize,
         offset: u64,
     ) -> Result<ContiguousBytesResponse> {
+        self.api_contiguous_bytes_from_with_limit(idx, file_id, offset, u64::MAX)
+    }
+
+    /// Same as `api_contiguous_bytes_from`, but scans at most `max_bytes`.
+    /// Streaming status only needs the active warm window, avoiding an O(file)
+    /// verified-piece scan for already completed large files.
+    pub fn api_contiguous_bytes_from_with_limit(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<ContiguousBytesResponse> {
         let mgr = self.mgr_handle(idx)?;
         let Some((file_offset, file_len)) = mgr.with_metadata(|metadata| {
             metadata
@@ -576,7 +589,9 @@ impl Api {
         };
         let offset = offset.min(file_len);
         let absolute_offset = file_offset.saturating_add(offset);
-        let file_end = file_offset.saturating_add(file_len);
+        let file_end = file_offset
+            .saturating_add(file_len)
+            .min(absolute_offset.saturating_add(max_bytes));
         let contiguous_bytes = mgr.with_chunk_tracker(|chunks| {
             let lengths = chunks.get_lengths();
             let mut cursor = absolute_offset;

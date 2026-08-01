@@ -549,7 +549,23 @@ impl Api {
     ) -> Result<()> {
         let mgr = self.mgr_handle(idx)?;
         let live = mgr.live().context("torrent not live")?;
-        live.set_streaming_window(file_id, offset, length)
+        live.set_streaming_window(file_id, offset, length, length)
+            .map_err(ApiError::from)
+    }
+
+    /// Set a two-tier playback window. `urgent_length` is yielded before the
+    /// remainder of `warm_length`, ahead of normal selected-file work.
+    pub fn api_set_streaming_window_with_priority(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        offset: u64,
+        urgent_length: u64,
+        warm_length: u64,
+    ) -> Result<()> {
+        let mgr = self.mgr_handle(idx)?;
+        let live = mgr.live().context("torrent not live")?;
+        live.set_streaming_window(file_id, offset, urgent_length, warm_length)
             .map_err(ApiError::from)
     }
 

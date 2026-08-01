@@ -26,6 +26,7 @@ type StreamId = usize;
 // 32 mb lookahead by default.
 const PER_STREAM_BUF_DEFAULT: u64 = 32 * 1024 * 1024;
 
+#[derive(Clone)]
 struct StreamState {
     file_id: usize,
     file_len: u64,
@@ -61,7 +62,16 @@ impl StreamState {
 pub(crate) struct TorrentStreams {
     next_stream_id: AtomicUsize,
     streams: DashMap<StreamId, StreamState>,
-    windows: DashMap<usize, (StreamState, u64)>,
+    windows: DashMap<usize, StreamingWindow>,
+}
+
+/// A scheduler-owned playback window. The urgent range is always yielded
+/// before the warm range so startup and seeks can acquire their first pieces
+/// without competing with longer look-ahead work.
+struct StreamingWindow {
+    state: StreamState,
+    urgent_length: u64,
+    warm_length: u64,
 }
 
 impl TorrentStreams {
@@ -99,10 +109,26 @@ impl TorrentStreams {
             }
         }
 
-        let windows = self
+        let urgent_windows = self
             .windows
             .iter()
-            .flat_map(|window| window.value().0.queue_with_limit(lengths, window.value().1))
+            .flat_map(|window| {
+                window
+                    .value()
+                    .state
+                    .queue_with_limit(lengths, window.value().urgent_length)
+            })
+            .collect::<Vec<_>>();
+        let warm_windows = self
+            .windows
+            .iter()
+            .flat_map(|window| {
+                let window = window.value();
+                let warm_after_urgent = window.warm_length.saturating_sub(window.urgent_length);
+                let mut state = window.state.clone();
+                state.position = state.position.saturating_add(window.urgent_length);
+                state.queue_with_limit(lengths, warm_after_urgent)
+            })
             .collect::<Vec<_>>();
         let mut all: Vec<_> = self.streams.iter().map(|s| s.queue(lengths)).collect();
 
@@ -110,7 +136,10 @@ impl TorrentStreams {
         use rand::seq::SliceRandom;
         all.shuffle(&mut rand::rng());
 
-        windows.into_iter().chain(Interleave { all: all.into() })
+        urgent_windows
+            .into_iter()
+            .chain(warm_windows)
+            .chain(Interleave { all: all.into() })
     }
 
     pub(crate) fn set_streaming_window(
@@ -119,20 +148,22 @@ impl TorrentStreams {
         file_len: u64,
         file_abs_offset: u64,
         offset: u64,
-        length: u64,
+        urgent_length: u64,
+        warm_length: u64,
     ) {
         self.windows.insert(
             file_id,
-            (
-                StreamState {
+            StreamingWindow {
+                state: StreamState {
                     file_id,
                     file_len,
                     file_abs_offset,
                     position: offset.min(file_len),
                     waker: None,
                 },
-                length,
-            ),
+                urgent_length,
+                warm_length: warm_length.max(urgent_length),
+            },
         );
     }
 

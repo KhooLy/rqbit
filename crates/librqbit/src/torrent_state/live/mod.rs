@@ -216,7 +216,8 @@ impl TorrentStateLive {
         &self,
         file_id: usize,
         offset: u64,
-        length: u64,
+        urgent_length: u64,
+        warm_length: u64,
     ) -> anyhow::Result<()> {
         let file = self
             .metadata
@@ -228,7 +229,8 @@ impl TorrentStateLive {
             file.len,
             file.offset_in_torrent,
             offset,
-            length,
+            urgent_length,
+            warm_length,
         );
         Ok(())
     }

@@ -33,6 +33,20 @@ pub use crate::torrent_state::stats::{LiveStats, TorrentStats};
 
 pub type Result<T> = std::result::Result<T, ApiError>;
 
+/// Aggregate live-peer quality signals for an embedding streaming scheduler.
+/// These are observability values, not a peer identity or ban list.
+#[derive(Debug, Serialize)]
+pub struct PeerQualityResponse {
+    pub live_peers: usize,
+    pub connection_attempts: u64,
+    pub connections: u64,
+    pub errors: u64,
+    pub fetched_bytes: u64,
+    pub fetched_chunks: u64,
+    pub downloaded_and_checked_pieces: u64,
+    pub total_piece_download_ms: u64,
+}
+
 /// Library API for use in different web frameworks.
 /// Contains all methods you might want to expose with (de)serializable inputs/outputs.
 #[derive(Clone)]
@@ -286,6 +300,36 @@ impl Api {
                 crate::Error::TorrentIsNotLive,
             )?
             .per_peer_stats_snapshot(filter))
+    }
+
+    pub fn api_peer_quality(&self, idx: TorrentIdOrHash) -> Result<PeerQualityResponse> {
+        let handle = self.mgr_handle(idx)?;
+        let peers = handle
+            .live()
+            .context("not live")?
+            .per_peer_stats_snapshot(PeerStatsFilter::default())
+            .peers;
+        let mut quality = PeerQualityResponse {
+            live_peers: peers.len(),
+            connection_attempts: 0,
+            connections: 0,
+            errors: 0,
+            fetched_bytes: 0,
+            fetched_chunks: 0,
+            downloaded_and_checked_pieces: 0,
+            total_piece_download_ms: 0,
+        };
+        for peer in peers.values() {
+            quality.connection_attempts += u64::from(peer.counters.connection_attempts);
+            quality.connections += u64::from(peer.counters.connections);
+            quality.errors += u64::from(peer.counters.errors);
+            quality.fetched_bytes += peer.counters.fetched_bytes;
+            quality.fetched_chunks += u64::from(peer.counters.fetched_chunks);
+            quality.downloaded_and_checked_pieces +=
+                u64::from(peer.counters.downloaded_and_checked_pieces);
+            quality.total_piece_download_ms += peer.counters.total_piece_download_ms;
+        }
+        Ok(quality)
     }
 
     pub async fn api_torrent_action_pause(

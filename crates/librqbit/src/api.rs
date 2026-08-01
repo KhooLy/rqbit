@@ -538,6 +538,29 @@ impl Api {
         })
     }
 
+    /// Prioritize the piece range immediately after a playback offset before
+    /// normal file selection. Replacing a window drops the old seek target.
+    pub fn api_set_streaming_window(
+        &self,
+        idx: TorrentIdOrHash,
+        file_id: usize,
+        offset: u64,
+        length: u64,
+    ) -> Result<()> {
+        let mgr = self.mgr_handle(idx)?;
+        let live = mgr.live().context("torrent not live")?;
+        live.set_streaming_window(file_id, offset, length)
+            .map_err(ApiError::from)
+    }
+
+    pub fn api_clear_streaming_window(&self, idx: TorrentIdOrHash, file_id: usize) -> Result<()> {
+        let mgr = self.mgr_handle(idx)?;
+        if let Some(live) = mgr.live() {
+            live.clear_streaming_window(file_id);
+        }
+        Ok(())
+    }
+
     pub fn api_stream(&self, idx: TorrentIdOrHash, file_id: usize) -> Result<FileStream> {
         let mgr = self.mgr_handle(idx)?;
         Ok(mgr.stream(file_id)?)

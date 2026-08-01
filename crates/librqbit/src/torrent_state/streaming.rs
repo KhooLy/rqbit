@@ -40,8 +40,16 @@ impl StreamState {
     }
 
     fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + 'a {
+        self.queue_with_limit(lengths, PER_STREAM_BUF_DEFAULT)
+    }
+
+    fn queue_with_limit<'a>(
+        &self,
+        lengths: &'a Lengths,
+        lookahead: u64,
+    ) -> impl Iterator<Item = ValidPieceIndex> + 'a {
         let start = self.file_abs_offset + self.position;
-        let end = (start + PER_STREAM_BUF_DEFAULT).min(self.file_abs_offset + self.file_len);
+        let end = (start + lookahead).min(self.file_abs_offset + self.file_len);
         let dpl = lengths.default_piece_length();
         let start_id = (start / dpl as u64).try_into().unwrap();
         let end_id = end.div_ceil(dpl as u64).try_into().unwrap();
@@ -53,6 +61,7 @@ impl StreamState {
 pub(crate) struct TorrentStreams {
     next_stream_id: AtomicUsize,
     streams: DashMap<StreamId, StreamState>,
+    windows: DashMap<usize, (StreamState, u64)>,
 }
 
 impl TorrentStreams {
@@ -90,13 +99,45 @@ impl TorrentStreams {
             }
         }
 
+        let windows = self
+            .windows
+            .iter()
+            .flat_map(|window| window.value().0.queue_with_limit(lengths, window.value().1))
+            .collect::<Vec<_>>();
         let mut all: Vec<_> = self.streams.iter().map(|s| s.queue(lengths)).collect();
 
         // Shuffle to decrease determinism and make queueing fairer.
         use rand::seq::SliceRandom;
         all.shuffle(&mut rand::rng());
 
-        Interleave { all: all.into() }
+        windows.into_iter().chain(Interleave { all: all.into() })
+    }
+
+    pub(crate) fn set_streaming_window(
+        &self,
+        file_id: usize,
+        file_len: u64,
+        file_abs_offset: u64,
+        offset: u64,
+        length: u64,
+    ) {
+        self.windows.insert(
+            file_id,
+            (
+                StreamState {
+                    file_id,
+                    file_len,
+                    file_abs_offset,
+                    position: offset.min(file_len),
+                    waker: None,
+                },
+                length,
+            ),
+        );
+    }
+
+    pub(crate) fn clear_streaming_window(&self, file_id: usize) {
+        self.windows.remove(&file_id);
     }
 
     pub(crate) fn wake_streams_on_piece_completed(

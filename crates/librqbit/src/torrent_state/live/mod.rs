@@ -212,6 +212,30 @@ pub struct TorrentStateLive {
 }
 
 impl TorrentStateLive {
+    pub fn set_streaming_window(
+        &self,
+        file_id: usize,
+        offset: u64,
+        length: u64,
+    ) -> anyhow::Result<()> {
+        let file = self
+            .metadata
+            .file_infos
+            .get(file_id)
+            .context("file index out of bounds")?;
+        self.streams.set_streaming_window(
+            file_id,
+            file.len,
+            file.offset_in_torrent,
+            offset,
+            length,
+        );
+        Ok(())
+    }
+
+    pub fn clear_streaming_window(&self, file_id: usize) {
+        self.streams.clear_streaming_window(file_id);
+    }
     pub(crate) fn new(
         paused: TorrentStatePaused,
         fatal_errors_tx: tokio::sync::oneshot::Sender<anyhow::Error>,

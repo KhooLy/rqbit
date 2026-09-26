@@ -48,6 +48,7 @@ mod bitv_factory;
 mod chunk_tracker;
 mod create_torrent_file;
 mod dht_utils;
+pub use dht_utils::MagnetResolveSnapshot;
 mod error;
 pub mod file_info;
 mod file_ops;

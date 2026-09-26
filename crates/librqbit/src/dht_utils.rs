@@ -20,7 +20,6 @@ use crate::{
 };
 use librqbit_core::hash_id::Id20;
 
-const MAX_CONCURRENT_CONNECTS: usize = 256;
 const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::ZERO,
@@ -83,19 +82,14 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     let mut failed = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
 
-    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTS));
     let read_info_guarded = |addr| {
         let connector = connector.clone();
         let client_name_and_version = client_name_and_version.clone();
-        let permits = permits.clone();
         progress.seen.fetch_add(1, Ordering::Relaxed);
         async move {
             let mut ret = Err(anyhow::anyhow!("not attempted"));
             for (attempt, backoff) in RETRY_BACKOFF.into_iter().enumerate() {
                 tokio::time::sleep(backoff).await;
-                let Ok(_permit) = permits.acquire().await else {
-                    break;
-                };
                 progress.connecting.fetch_add(1, Ordering::Relaxed);
                 let mut opts = peer_connection_options.unwrap_or_default();
                 if attempt == 0 {

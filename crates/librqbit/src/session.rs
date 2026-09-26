@@ -1280,12 +1280,19 @@ impl Session {
                     // Add back seen_peers into the peer stream, as we consumed some peers
                     // while resolving the magnet.
                     seen_peers = resolved_magnet.seen_peers.clone();
+                    let source = resolved_magnet.source;
+                    let fresh: Vec<_> = resolved_magnet
+                        .seen_peers
+                        .into_iter()
+                        .filter(|a| *a != source && !resolved_magnet.failed_peers.contains(a))
+                        .collect();
                     let peer_rx = Some(
-                        merge_streams(
-                            resolved_magnet.peer_rx,
-                            futures::stream::iter(resolved_magnet.seen_peers),
-                        )
-                        .boxed(),
+                        futures::stream::iter([source])
+                            .chain(merge_streams(
+                                resolved_magnet.peer_rx,
+                                futures::stream::iter(fresh),
+                            ))
+                            .boxed(),
                     );
                     (resolved_magnet.metadata, peer_rx)
                 }
@@ -1707,6 +1714,8 @@ impl Session {
                 info_bytes,
                 rx,
                 seen,
+                source,
+                failed,
             } => {
                 trace!(?info, "received result from DHT");
                 let info = info.validate()?;
@@ -1717,6 +1726,8 @@ impl Session {
                         info_bytes.0,
                     )?,
                     peer_rx: rx,
+                    source,
+                    failed_peers: failed,
                     seen_peers: {
                         let seen = seen.into_iter().collect_vec();
                         for peer in &seen {
@@ -1778,6 +1789,8 @@ pub(crate) struct ResolveMagnetResult {
     pub metadata: TorrentMetadata,
     pub peer_rx: PeerStream,
     pub seen_peers: Vec<SocketAddr>,
+    pub source: SocketAddr,
+    pub failed_peers: HashSet<SocketAddr>,
 }
 
 fn remove_files_and_dirs(infos: &FileInfos, files: &dyn TorrentStorage) {

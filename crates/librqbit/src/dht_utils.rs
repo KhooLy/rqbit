@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -18,6 +19,14 @@ use crate::{
     stream_connect::StreamConnector,
 };
 use librqbit_core::hash_id::Id20;
+
+const MAX_CONCURRENT_CONNECTS: usize = 128;
+const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
 
 #[derive(Debug, Default)]
 pub struct MagnetResolveProgress {
@@ -71,27 +80,46 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     let mut seen = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
 
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTS));
     let read_info_guarded = |addr| {
         let connector = connector.clone();
         let client_name_and_version = client_name_and_version.clone();
+        let permits = permits.clone();
         progress.seen.fetch_add(1, Ordering::Relaxed);
-        progress.connecting.fetch_add(1, Ordering::Relaxed);
         async move {
-            let ret = peer_info_reader::read_metainfo_from_peer(
-                addr,
-                peer_id,
-                info_hash,
-                peer_connection_options,
-                // This shouldn't be called anyway as we aren't reading/writing to disk, so it's
-                // ok not to use a shared one.
-                BlockingSpawner::new(1),
-                connector,
-                client_name_and_version,
-            )
-            .instrument(debug_span!("read_metainfo_from_peer", ?addr))
-            .await
-            .with_context(|| format!("error reading metainfo from {addr}"));
-            progress.connecting.fetch_sub(1, Ordering::Relaxed);
+            let mut ret = Err(anyhow::anyhow!("not attempted"));
+            for (attempt, backoff) in RETRY_BACKOFF.into_iter().enumerate() {
+                tokio::time::sleep(backoff).await;
+                let Ok(_permit) = permits.acquire().await else {
+                    break;
+                };
+                progress.connecting.fetch_add(1, Ordering::Relaxed);
+                let mut opts = peer_connection_options.unwrap_or_default();
+                if attempt == 0 {
+                    opts.connect_timeout = Some(
+                        opts.connect_timeout
+                            .map_or(FIRST_CONNECT_TIMEOUT, |t| t.min(FIRST_CONNECT_TIMEOUT)),
+                    );
+                }
+                ret = peer_info_reader::read_metainfo_from_peer(
+                    addr,
+                    peer_id,
+                    info_hash,
+                    Some(opts),
+                    // This shouldn't be called anyway as we aren't reading/writing to disk, so it's
+                    // ok not to use a shared one.
+                    BlockingSpawner::new(1),
+                    connector.clone(),
+                    client_name_and_version.clone(),
+                )
+                .instrument(debug_span!("read_metainfo_from_peer", ?addr))
+                .await
+                .with_context(|| format!("error reading metainfo from {addr}"));
+                progress.connecting.fetch_sub(1, Ordering::Relaxed);
+                if ret.is_ok() {
+                    break;
+                }
+            }
             if ret.is_err() {
                 progress.failed.fetch_add(1, Ordering::Relaxed);
             }

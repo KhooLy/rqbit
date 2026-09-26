@@ -20,7 +20,7 @@ use crate::{
 };
 use librqbit_core::hash_id::Id20;
 
-const MAX_CONCURRENT_CONNECTS: usize = 128;
+const MAX_CONCURRENT_CONNECTS: usize = 256;
 const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::ZERO,
@@ -60,6 +60,8 @@ pub enum ReadMetainfoResult<Rx> {
         info_bytes: ByteBufOwned,
         rx: Rx,
         seen: HashSet<SocketAddr>,
+        source: SocketAddr,
+        failed: HashSet<SocketAddr>,
     },
     ChannelClosed {
         #[allow(dead_code)]
@@ -78,6 +80,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     progress: &MagnetResolveProgress,
 ) -> ReadMetainfoResult<A> {
     let mut seen = HashSet::<SocketAddr>::new();
+    let mut failed = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
 
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTS));
@@ -123,7 +126,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             if ret.is_err() {
                 progress.failed.fetch_add(1, Ordering::Relaxed);
             }
-            ret
+            (addr, ret)
         }
     };
 
@@ -144,9 +147,10 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
         tokio::select! {
             done = unordered.next(), if !unordered.is_empty() => {
                 match done {
-                    Some(Ok((info, info_bytes))) => return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs },
-                    Some(Err(e)) => {
+                    Some((source, Ok((info, info_bytes)))) => return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs, source, failed },
+                    Some((addr, Err(e))) => {
                         debug!("{:#}", e);
+                        failed.insert(addr);
                     },
                     None => unreachable!()
                 }

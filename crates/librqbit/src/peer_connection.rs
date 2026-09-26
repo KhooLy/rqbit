@@ -223,6 +223,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             .connect_timeout
             .unwrap_or_else(|| Duration::from_secs(10));
 
+        self.connector.pace().await;
         let now = Instant::now();
         let (ckind, mut read, mut write) = with_timeout(
             "connecting",

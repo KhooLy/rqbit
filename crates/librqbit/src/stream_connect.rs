@@ -127,6 +127,8 @@ gen_stats!(ConnectStatsAtomic ConnectStatsSnapshot, [], [
     utp PerFamilyAtomic PerFamilySnapshot
 ]);
 
+const CONNECT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 #[derive(Debug)]
 pub(crate) struct StreamConnector {
     proxy_config: Option<SocksProxyConfig>,
@@ -135,6 +137,7 @@ pub(crate) struct StreamConnector {
     utp_socket: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     stats: ConnectStatsAtomic,
     ipv4_only: bool,
+    next_connect: std::sync::Mutex<tokio::time::Instant>,
 }
 
 impl StreamConnector {
@@ -160,7 +163,23 @@ impl StreamConnector {
             bind_device: config.bind_device,
             stats: Default::default(),
             ipv4_only: config.ipv4_only,
+            next_connect: std::sync::Mutex::new(tokio::time::Instant::now()),
         })
+    }
+
+    pub async fn pace(&self) {
+        loop {
+            let wait_until = {
+                let mut next = self.next_connect.lock().unwrap();
+                let now = tokio::time::Instant::now();
+                if now >= *next {
+                    *next = now + CONNECT_INTERVAL;
+                    return;
+                }
+                *next
+            };
+            tokio::time::sleep_until(wait_until).await;
+        }
     }
 
     fn get_stat(&self, kind: ConnectionKind, is_v6: bool) -> &SingleStatAtomic {

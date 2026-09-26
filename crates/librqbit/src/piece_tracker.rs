@@ -24,6 +24,10 @@ use crate::{
     type_aliases::{FileInfos, FilePriorities, PeerHandle},
 };
 
+const URGENT_PIECES: usize = 4;
+const URGENT_STEAL_MIN: Duration = Duration::from_secs(1);
+const URGENT_STEAL_AFTER: Duration = Duration::from_secs(3);
+
 /// Tracks a piece currently being downloaded.
 #[derive(Debug, Clone)]
 pub struct InflightPiece {
@@ -126,6 +130,12 @@ impl PieceTracker {
         P: Fn(ValidPieceIndex) -> bool,
         S: Fn(ValidPieceIndex) -> bool,
     {
+        let priority: Vec<ValidPieceIndex> = req.priority_pieces.by_ref().collect();
+
+        if let Some(result) = self.try_steal_urgent(&req, &priority) {
+            return result;
+        }
+
         // 1. Try steal with 10x threshold (very slow peer)
         if let Some(result) = self.try_steal(&req, 10.0) {
             return result;
@@ -133,7 +143,7 @@ impl PieceTracker {
 
         // 2. Try reserve from priority_pieces then queued pieces
         // First check priority pieces that aren't already downloaded or in-flight
-        for piece in &mut req.priority_pieces {
+        for piece in priority {
             if !self.chunks.is_piece_have(piece)
                 && !self.inflight.contains_key(&piece)
                 && (req.peer_has_piece)(piece)
@@ -174,6 +184,39 @@ impl PieceTracker {
             },
         );
         AcquireResult::Reserved(piece)
+    }
+
+    fn try_steal_urgent<I, P, S>(
+        &mut self,
+        req: &AcquireRequest<I, P, S>,
+        priority: &[ValidPieceIndex],
+    ) -> Option<AcquireResult>
+    where
+        I: Iterator<Item = ValidPieceIndex>,
+        P: Fn(ValidPieceIndex) -> bool,
+        S: Fn(ValidPieceIndex) -> bool,
+    {
+        let after = req
+            .peer_avg_time
+            .map(|avg| avg * 2)
+            .unwrap_or(URGENT_STEAL_AFTER)
+            .clamp(URGENT_STEAL_MIN, URGENT_STEAL_AFTER);
+        let piece = priority
+            .iter()
+            .copied()
+            .filter(|p| !self.chunks.is_piece_have(*p))
+            .take(URGENT_PIECES)
+            .find(|p| {
+                self.inflight
+                    .get(p)
+                    .is_some_and(|info| info.peer != req.peer && info.started.elapsed() >= after)
+                    && (req.peer_has_piece)(*p)
+                    && (req.can_steal)(*p)
+            })?;
+        let info = self.inflight.get_mut(&piece)?;
+        let from_peer = std::mem::replace(&mut info.peer, req.peer);
+        info.started = Instant::now();
+        Some(AcquireResult::Stolen { piece, from_peer })
     }
 
     /// Try to steal a piece from a slower peer.
@@ -797,6 +840,38 @@ mod tests {
                 assert_eq!(from_peer, peer_a);
                 // Verify piece 0 is still owned by peer A (wasn't stolen)
                 assert_eq!(tracker.get_inflight(piece_0).unwrap().peer, peer_a);
+            }
+            _ => panic!("Expected Stolen, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn new_peer_takes_over_stalled_stream_piece() {
+        let mut tracker = PieceTracker::new(make_test_chunk_tracker(5));
+        let file_infos = make_test_file_infos(5);
+        let file_priorities = make_default_file_priorities(&file_infos);
+        let head = tracker
+            .chunks()
+            .get_lengths()
+            .validate_piece_index(0)
+            .unwrap();
+        tracker.reserve_piece(head, peer(1));
+        tracker.inflight.get_mut(&head).unwrap().started -= URGENT_STEAL_AFTER;
+
+        let result = tracker.acquire_piece(AcquireRequest {
+            peer: peer(2),
+            peer_avg_time: None,
+            priority_pieces: [head].into_iter(),
+            file_priorities: &file_priorities,
+            file_infos: &file_infos,
+            peer_has_piece: |_| true,
+            can_steal: |_| true,
+        });
+
+        match result {
+            AcquireResult::Stolen { piece, from_peer } => {
+                assert_eq!(piece, head);
+                assert_eq!(from_peer, peer(1));
             }
             _ => panic!("Expected Stolen, got {:?}", result),
         }

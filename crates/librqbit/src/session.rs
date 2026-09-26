@@ -18,7 +18,10 @@ use crate::{
     bitv_factory::{BitVFactory, NonPersistentBitVFactory},
     create_torrent,
     create_torrent_file::CreateTorrentResult,
-    dht_utils::{ReadMetainfoResult, read_metainfo_from_peer_receiver},
+    dht_utils::{
+        MagnetResolveProgress, MagnetResolveSnapshot, ReadMetainfoResult,
+        read_metainfo_from_peer_receiver,
+    },
     ip_ranges::IpRanges,
     limits::{Limits, LimitsConfig},
     listen::{Accept, ListenerOptions},
@@ -107,6 +110,7 @@ impl SessionDatabase {
 pub struct Session {
     // Core state and services
     pub(crate) db: RwLock<SessionDatabase>,
+    resolving_magnets: RwLock<HashMap<Id20, Arc<MagnetResolveProgress>>>,
     next_id: AtomicUsize,
     pub(crate) bitv_factory: Arc<dyn BitVFactory>,
     spawner: BlockingSpawner,
@@ -787,6 +791,7 @@ impl Session {
                 output_folder: default_output_folder,
                 next_id: AtomicUsize::new(0),
                 db: RwLock::new(Default::default()),
+                resolving_magnets: Default::default(),
                 _cancellation_token_drop_guard: token.clone().drop_guard(),
                 cancellation_token: token,
                 announce_port: listen_result.as_ref().and_then(|l| l.announce_port),
@@ -1640,6 +1645,32 @@ impl Session {
         trackers: &[url::Url],
         peer_opts: Option<PeerConnectionOptions>,
     ) -> anyhow::Result<ResolveMagnetResult> {
+        let progress = Arc::new(MagnetResolveProgress::default());
+        self.resolving_magnets
+            .write()
+            .insert(info_hash, progress.clone());
+        let result = self
+            .resolve_magnet_tracked(info_hash, peer_rx, trackers, peer_opts, &progress)
+            .await;
+        self.resolving_magnets.write().remove(&info_hash);
+        result
+    }
+
+    pub fn magnet_resolve_progress(&self, info_hash: &Id20) -> Option<MagnetResolveSnapshot> {
+        self.resolving_magnets
+            .read()
+            .get(info_hash)
+            .map(|progress| progress.snapshot())
+    }
+
+    async fn resolve_magnet_tracked(
+        self: &Arc<Self>,
+        info_hash: Id20,
+        peer_rx: PeerStream,
+        trackers: &[url::Url],
+        peer_opts: Option<PeerConnectionOptions>,
+        progress: &MagnetResolveProgress,
+    ) -> anyhow::Result<ResolveMagnetResult> {
         match read_metainfo_from_peer_receiver(
             self.peer_id,
             info_hash,
@@ -1648,6 +1679,7 @@ impl Session {
             Some(self.merge_peer_opts(peer_opts)),
             self.connector.clone(),
             self.client_name_and_version.clone(),
+            progress,
         )
         .await
         {

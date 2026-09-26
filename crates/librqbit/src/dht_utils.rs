@@ -1,4 +1,11 @@
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::Context;
 use buffers::ByteBufOwned;
@@ -11,6 +18,30 @@ use crate::{
     stream_connect::StreamConnector,
 };
 use librqbit_core::hash_id::Id20;
+
+#[derive(Debug, Default)]
+pub struct MagnetResolveProgress {
+    seen: AtomicU64,
+    connecting: AtomicU64,
+    failed: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct MagnetResolveSnapshot {
+    pub seen: u64,
+    pub connecting: u64,
+    pub failed: u64,
+}
+
+impl MagnetResolveProgress {
+    pub fn snapshot(&self) -> MagnetResolveSnapshot {
+        MagnetResolveSnapshot {
+            seen: self.seen.load(Ordering::Relaxed),
+            connecting: self.connecting.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+}
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -35,18 +66,17 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     peer_connection_options: Option<PeerConnectionOptions>,
     connector: Arc<StreamConnector>,
     client_name_and_version: String,
+    progress: &MagnetResolveProgress,
 ) -> ReadMetainfoResult<A> {
     let mut seen = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
 
-    let semaphore = tokio::sync::Semaphore::new(128);
-
     let read_info_guarded = |addr| {
-        let semaphore = &semaphore;
         let connector = connector.clone();
         let client_name_and_version = client_name_and_version.clone();
+        progress.seen.fetch_add(1, Ordering::Relaxed);
+        progress.connecting.fetch_add(1, Ordering::Relaxed);
         async move {
-            let token = semaphore.acquire().await?;
             let ret = peer_info_reader::read_metainfo_from_peer(
                 addr,
                 peer_id,
@@ -61,7 +91,10 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             .instrument(debug_span!("read_metainfo_from_peer", ?addr))
             .await
             .with_context(|| format!("error reading metainfo from {addr}"));
-            drop(token);
+            progress.connecting.fetch_sub(1, Ordering::Relaxed);
+            if ret.is_err() {
+                progress.failed.fetch_add(1, Ordering::Relaxed);
+            }
             ret
         }
     };
@@ -146,6 +179,7 @@ mod tests {
             None,
             Arc::new(StreamConnector::new(Default::default()).await.unwrap()),
             crate::client_name_and_version().to_owned(),
+            &Default::default(),
         )
         .await
         {

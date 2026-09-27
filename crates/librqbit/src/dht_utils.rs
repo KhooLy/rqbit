@@ -20,6 +20,7 @@ use crate::{
 };
 use librqbit_core::hash_id::Id20;
 
+const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::ZERO,
     Duration::from_secs(5),
@@ -96,14 +97,18 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
         progress.seen.fetch_add(1, Ordering::Relaxed);
         async move {
             let mut ret = Err(anyhow::anyhow!("not attempted"));
-            for backoff in RETRY_BACKOFF {
+            for (attempt, backoff) in RETRY_BACKOFF.into_iter().enumerate() {
                 tokio::time::sleep(backoff).await;
                 progress.connecting.fetch_add(1, Ordering::Relaxed);
+                let mut opts = peer_connection_options.unwrap_or_default();
+                if attempt == 0 {
+                    opts.connect_timeout = Some(FIRST_CONNECT_TIMEOUT);
+                }
                 ret = peer_info_reader::read_metainfo_from_peer(
                     addr,
                     peer_id,
                     info_hash,
-                    peer_connection_options,
+                    Some(opts),
                     // This shouldn't be called anyway as we aren't reading/writing to disk, so it's
                     // ok not to use a shared one.
                     BlockingSpawner::new(1),

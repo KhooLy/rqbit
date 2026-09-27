@@ -125,6 +125,8 @@ gen_stats!(ConnectStatsAtomic ConnectStatsSnapshot, [], [
     utp PerFamilyAtomic PerFamilySnapshot
 ]);
 
+const HALF_OPEN_LIMIT: usize = 64;
+
 #[derive(Debug)]
 pub(crate) struct StreamConnector {
     proxy_config: Option<SocksProxyConfig>,
@@ -133,6 +135,7 @@ pub(crate) struct StreamConnector {
     utp_socket: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     stats: ConnectStatsAtomic,
     ipv4_only: bool,
+    pub(crate) half_open: tokio::sync::Semaphore,
 }
 
 impl StreamConnector {
@@ -158,6 +161,7 @@ impl StreamConnector {
             bind_device: config.bind_device,
             stats: Default::default(),
             ipv4_only: config.ipv4_only,
+            half_open: tokio::sync::Semaphore::new(HALF_OPEN_LIMIT),
         })
     }
 

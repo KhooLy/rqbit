@@ -223,6 +223,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             .connect_timeout
             .unwrap_or_else(|| Duration::from_secs(10));
 
+        let half_open = self.connector.half_open.acquire().await.ok();
         let now = Instant::now();
         let (ckind, mut read, mut write) = with_timeout(
             "connecting",
@@ -230,6 +231,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             self.connector.connect(self.addr),
         )
         .await?;
+        drop(half_open);
 
         async move {
             self.handler.on_connected(now.elapsed());

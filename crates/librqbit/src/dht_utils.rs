@@ -20,12 +20,20 @@ use crate::{
 };
 use librqbit_core::hash_id::Id20;
 
-const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RETRY_BACKOFF: [Duration; 3] = [
     Duration::ZERO,
     Duration::from_secs(5),
     Duration::from_secs(15),
 ];
+
+fn is_connect_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<crate::Error>(),
+            Some(crate::Error::Timeout("connecting"))
+        )
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct MagnetResolveProgress {
@@ -88,21 +96,14 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
         progress.seen.fetch_add(1, Ordering::Relaxed);
         async move {
             let mut ret = Err(anyhow::anyhow!("not attempted"));
-            for (attempt, backoff) in RETRY_BACKOFF.into_iter().enumerate() {
+            for backoff in RETRY_BACKOFF {
                 tokio::time::sleep(backoff).await;
                 progress.connecting.fetch_add(1, Ordering::Relaxed);
-                let mut opts = peer_connection_options.unwrap_or_default();
-                if attempt == 0 {
-                    opts.connect_timeout = Some(
-                        opts.connect_timeout
-                            .map_or(FIRST_CONNECT_TIMEOUT, |t| t.min(FIRST_CONNECT_TIMEOUT)),
-                    );
-                }
                 ret = peer_info_reader::read_metainfo_from_peer(
                     addr,
                     peer_id,
                     info_hash,
-                    Some(opts),
+                    peer_connection_options,
                     // This shouldn't be called anyway as we aren't reading/writing to disk, so it's
                     // ok not to use a shared one.
                     BlockingSpawner::new(1),
@@ -113,7 +114,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
                 .await
                 .with_context(|| format!("error reading metainfo from {addr}"));
                 progress.connecting.fetch_sub(1, Ordering::Relaxed);
-                if ret.is_ok() {
+                if !ret.as_ref().is_err_and(is_connect_timeout) {
                     break;
                 }
             }

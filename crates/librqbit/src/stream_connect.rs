@@ -125,7 +125,7 @@ gen_stats!(ConnectStatsAtomic ConnectStatsSnapshot, [], [
     utp PerFamilyAtomic PerFamilySnapshot
 ]);
 
-const HALF_OPEN_LIMIT: usize = 64;
+const HALF_OPEN_LIMIT: usize = 128;
 
 #[derive(Debug)]
 pub(crate) struct StreamConnector {

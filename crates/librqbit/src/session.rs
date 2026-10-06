@@ -1053,6 +1053,7 @@ impl Session {
             max_request_window: other
                 .max_request_window
                 .or(self.peer_opts.max_request_window),
+            encrypt: other.encrypt,
         }
     }
 

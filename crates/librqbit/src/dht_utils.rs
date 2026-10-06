@@ -21,18 +21,23 @@ use crate::{
 use librqbit_core::hash_id::Id20;
 
 const FIRST_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const RETRY_BACKOFF: [Duration; 3] = [
+const RETRY_BACKOFF: [Duration; 10] = [
     Duration::ZERO,
-    Duration::from_secs(5),
-    Duration::from_secs(15),
+    Duration::from_millis(300),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(10),
 ];
 
-fn is_connect_timeout(e: &anyhow::Error) -> bool {
+fn is_permanent(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
-        matches!(
-            c.downcast_ref::<crate::Error>(),
-            Some(crate::Error::Timeout("connecting"))
-        )
+        let text = c.to_string();
+        text.contains("is too big") || text.contains("deserializing")
     })
 }
 
@@ -104,6 +109,7 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
                 if attempt == 0 {
                     opts.connect_timeout = Some(FIRST_CONNECT_TIMEOUT);
                 }
+                opts.encrypt = attempt % 2 == 1;
                 ret = peer_info_reader::read_metainfo_from_peer(
                     addr,
                     peer_id,
@@ -119,7 +125,10 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
                 .await
                 .with_context(|| format!("error reading metainfo from {addr}"));
                 progress.connecting.fetch_sub(1, Ordering::Relaxed);
-                if !ret.as_ref().is_err_and(is_connect_timeout) {
+                if let Err(e) = &ret {
+                    debug!(attempt, encrypt = opts.encrypt, "{:#}", e);
+                }
+                if ret.is_ok() || ret.as_ref().is_err_and(is_permanent) {
                     break;
                 }
             }

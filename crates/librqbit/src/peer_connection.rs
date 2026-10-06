@@ -77,6 +77,9 @@ pub struct PeerConnectionOptions {
 
     #[serde_as(as = "Option<serde_with::DurationSeconds>")]
     pub keep_alive_interval: Option<Duration>,
+
+    #[serde(default)]
+    pub encrypt: bool,
 }
 
 pub(crate) struct PeerConnection<H> {
@@ -233,14 +236,26 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
             let mut write_buf = Box::new([0u8; MAX_MSG_LEN]);
             let handshake = Handshake::new(self.info_hash, self.peer_id);
             let hsz = handshake.serialize_unchecked_len(&mut *write_buf);
-            with_timeout(
-                "writing",
-                rwtimeout,
-                write
-                    .write_all(&write_buf[..hsz])
-                    .map_err(Error::WriteHandshake),
-            )
-            .await?;
+            if self.options.encrypt {
+                let (dec, enc) = with_timeout(
+                    "encryption handshake",
+                    rwtimeout,
+                    crate::mse::initiate(&mut read, &mut write, self.info_hash, &write_buf[..hsz])
+                        .map_err(Error::WriteHandshake),
+                )
+                .await?;
+                read = Box::new(crate::mse::Rc4Reader::new(read, dec));
+                write = Box::new(crate::mse::Rc4Writer::new(write, enc));
+            } else {
+                with_timeout(
+                    "writing",
+                    rwtimeout,
+                    write
+                        .write_all(&write_buf[..hsz])
+                        .map_err(Error::WriteHandshake),
+                )
+                .await?;
+            }
 
             let mut read_buf = ReadBuf::new();
             let h = read_buf.read_handshake(&mut read, rwtimeout).await?;

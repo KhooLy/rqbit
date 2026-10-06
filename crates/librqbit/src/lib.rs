@@ -62,6 +62,7 @@ mod ip_ranges;
 pub mod limits;
 mod listen;
 mod merge_streams;
+mod mse;
 mod peer_connection;
 mod peer_info_reader;
 mod piece_tracker;

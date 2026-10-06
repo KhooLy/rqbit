@@ -1043,6 +1043,7 @@ impl Session {
             keep_alive_interval: other
                 .keep_alive_interval
                 .or(self.peer_opts.keep_alive_interval),
+            encrypt: other.encrypt,
         }
     }
 
